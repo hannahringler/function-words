@@ -1,3 +1,5 @@
 # function-words
 
-This repository contains additional materials for the project, _Title_. The bulk of the main analysis can be found in one large R notebook. Additional bits of analysis are organized by chapter.
+This repository contains additional materials for the project, _Close Statistical Reading: Rhetorical Interpretation of Computational Analyses of Texts at Scale_. The bulk of the analysis can be found in one large R notebook. Note that this analysis does not include smaller supplemental analyses that also appear in the work (such as part-of-speech analyses), as those were primarily done in very standard form using packages like spaCy. The repository also includes the metadata for the corpus used in this project, and a list of the function words used for analysis.
+
+I should also note here that my goal with this work was simply for the code to run on my machine and for my results to be accurate. That is to say, this code is neither pretty nor efficient. In that sense, this code is provided here purely as a reference for the work, and in the spirit of transparency, rather than as code that can be downloaded and ran easily on another user's machine. To quote Jason Baldridge, [``it's okay for academic software to suck.''](https://bcomposes.wordpress.com/2015/05/07/its-okay-for-academic-software-to-suck/)
