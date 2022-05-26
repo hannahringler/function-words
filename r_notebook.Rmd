@@ -1,0 +1,960 @@
+---
+title: "Dissertation Analysis"
+author: "Hannah Ringler"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    highlight: kate
+    number_sections: yes
+    theme: paper
+    toc: yes
+---
+# Create a corpus with metadata
+First, we will read in the corpus and metadata to create a table. This table will represent each text as one row, and will have multiple columns including the filename, discipline, journal title, year of publication, article title, author names, and complete text of the document.
+
+```{r create corpus, message=FALSE}
+#Load relevant R packages
+library(tidyverse)
+library(quanteda)
+library(MASS)
+
+#Load in corpus metadata to a table
+metadata <- readxl::read_excel("corpus_metadata.xlsx")
+
+#Create a function to read in all of the texts into a table
+readtext_lite <- function(paths) {
+  # Get a vector of the file basenames
+  doc_ids <- basename(paths)
+  # Create a vector collapsing each text file into one element in a character vector
+  texts <- vapply(paths, function(i) paste(readLines(i), collapse = "\n"), 
+                  FUN.VALUE = character(1))
+  text_df <- data.frame(doc_id = doc_ids, text = texts, stringsAsFactors = FALSE)
+  return(text_df)
+}
+doc_df <- readtext_lite(metadata$Filename)
+
+#Create a corpus from the data frame and attach metadata
+full_corpus <- corpus(doc_df, docid_field="doc_id", text_field="text")
+docvars(full_corpus) <- metadata
+```
+
+# Count function words
+Next, we create normalized counts of function words in each text. The list of function words used here is drawn from _Longman's Grammar_ (1999).
+
+```{r count function words, message = FALSE}
+#Count tokens in each text
+corpus_tokens <- tokens(full_corpus, include_docvars=TRUE, remove_punct = TRUE,
+                        remove_numbers = FALSE, remove_symbols = TRUE, what = "word")
+
+#To account for phrasal function words, combine phrases together with underscores
+multiword_expressions <- readLines("phrasal_fxn_words.txt")
+corpus_tokens <- tokens_compound(corpus_tokens, pattern = phrase(multiword_expressions))
+rawtokens_dfm <- dfm(corpus_tokens)
+
+#Create vector of function words
+fxn_words = readLines("fxn_words.txt")
+
+#Select only function words
+fxnword_rawtokens_dfm <-dfm_select(rawtokens_dfm, pattern = fxn_words, selection = "keep")
+
+#Normalize token counts per 10,000 words
+fxnword_normalized_dfm <- 10000*(dfm_weight(fxnword_rawtokens_dfm, scheme = "prop"))
+
+```
+
+Here is a small sample of what we have created. Below is a table with a text on each row, and the normalized (by 10,000) counts of a few function words.
+
+```{r view frequency table, echo=FALSE}
+print(head(fxnword_normalized_dfm,5,nf=4))
+```
+
+# Exploratory data analysis
+Before jumping into more complicated stylometry analyses, we're first going to do some exploratory data analysis. In this section, we'll perform some more common text analyses to start getting a feel for how our data is distributed and what kinds of trends and patterns are showing up.
+
+## Word counts
+All of the texts in this corpus are academic articles, so we might expect them to be reasonably similar in terms of length. When plotting the lengths, we find that most tend to center around 10,000 words, but there are some very long outliers.
+
+```{r token totals, message =FALSE}
+tokencount <- ntoken(rawtokens_dfm)
+#Calculate binwidth with the Freedman–Diaconis rule
+binwidth_tokens <- 2 * IQR(tokencount) / length(tokencount)^(1 / 3)
+
+#create a dataframe with token counts and disciplines
+fxnword_normalized_df <- convert(fxnword_normalized_dfm, to = "data.frame")
+fxnword_normalized_df$wordcount <- tokencount
+fxnword_normalized_df$discipline <- metadata$Discipline
+#plot histogram of lengths
+ggplot(fxnword_normalized_df, aes(x = wordcount)) + geom_histogram(binwidth = binwidth_tokens) +ylab("Number of papers") + xlab("Word count")
+```
+Further investigation the very long outliers appear to be driven by the discipline of physics.
+```{r length by discipline, echo=FALSE}
+#plot boxplot of lengths by discipline
+ggplot(data=fxnword_normalized_df,mapping=aes(x=reorder(discipline,-wordcount, FUN = median), y=wordcount)) + geom_boxplot(color="blue",fill="white") + theme_bw() + theme(text = element_text(size=6), axis.text.x = element_text(angle = 30, hjust = 1)) + xlab("Discipline") +ylab("Word count")
+```
+
+## Frequencies of key function words
+Preliminary data analysis showed that the following function words had large differences in z-scores between disciplines: were, how, they, as. Below are the normalized frequencies of these four words across disciplines, showing differences.
+```{r frequency comparisons, message=FALSE}
+#plot the four words
+were_plot <- ggplot(data=fxnword_normalized_df,mapping=aes(x=reorder(discipline,-were, FUN = median), y=were)) + geom_boxplot(color="blue",fill="white") + theme_bw() + theme(text = element_text(size=6), axis.text.x = element_text(angle = 30, hjust = 1)) + xlab("Discipline") + ylab("were")
+
+how_plot <- ggplot(data=fxnword_normalized_df,mapping=aes(x=reorder(discipline,-how, FUN = median), y=how)) + geom_boxplot(color="blue",fill="white")+ theme_bw() + theme(text = element_text(size=6), axis.text.x = element_text(angle = 30, hjust = 1)) + xlab("Discipline") + ylab("how")
+
+they_plot <- ggplot(data=fxnword_normalized_df,mapping=aes(x=reorder(discipline,-they, FUN = median), y=they)) + geom_boxplot(color="blue",fill="white")+ theme_bw() + theme(text = element_text(size=6), axis.text.x = element_text(angle = 30, hjust = 1)) + xlab("Discipline") + ylab("they")
+
+as_plot <- ggplot(data=fxnword_normalized_df,mapping=aes(x=reorder(discipline,-as, FUN = median), y=as)) + geom_boxplot(color="blue",fill="white")+ theme_bw() + theme(text = element_text(size=6), axis.text.x = element_text(angle = 30, hjust = 1)) + xlab("Discipline") + ylab("as")
+
+#arrange into a visual
+gridExtra::grid.arrange(were_plot, how_plot, they_plot, as_plot)
+```
+
+## Keyness and effect size
+The tables below identify 5 words for each discipline that are key in that discipline (compared to all of the other disciplines combined), and the effect size of those words. These tables are sorted by keyness values. A high keyness value indicates that there is a lot of evidence for difference in frequencies of that word between disciplines, while a high effect size indicates that the difference is quite large. Here, the keyness is calculated using log-likelihood and the effect size calculated using Hardie's log ratio.
+```{r keyness effect, message=FALSE}
+#create dfm grouped by discipline
+keyness_dfm <- dfm_group(rawtokens_dfm, groups="Disc_short")
+discipline_vector <- unique(metadata$Disc_short)
+#define function for calculating effect size using Hardie's log ratio
+effect_size <- function (n_target, n_reference) {
+  total_a <- sum(n_target)
+  total_b <- sum(n_reference)
+  percent_a <- ifelse(n_target == 0, 0.5 / total_a, n_target/total_a)
+  percent_b <- ifelse(n_reference == 0, 0.5 / total_b, n_reference/total_b)
+  ratio <- log2(percent_a / percent_b)
+  return(ratio)
+}
+#create list to store values in and data frame to print
+keywords <- list()
+keyword_table <- data.frame()
+#loop through disciplines and store values in keywords list
+#you can now access any discipline's keyness and effect size values with keywords[['[disc]']]. Ex: keywords[['cs']]
+for (i in 1:length(discipline_vector)) {
+  #get keywords
+  keywords[[discipline_vector[i]]] <- textstat_keyness(keyness_dfm, 
+                                                     target=discipline_vector[i], 
+                                                     measure = "lr")
+  #add effect size
+  keywords[[discipline_vector[i]]] <- keywords[[discipline_vector[i]]] %>% 
+    mutate(., effect = effect_size(n_target, n_reference))
+  #take away target and reference counts
+  pr <- dplyr::select(as.data.frame(keywords[[discipline_vector[i]]]), -n_target, -n_reference)
+  #rename columns
+  names(pr)[2] <- 'keyness'
+  names(pr)[3] <- 'p-value'
+  names(pr)[4] <- 'effect size'
+  #append to table for printing & save discipline name
+  keyword_table <- rbind(keyword_table, format(head(pr,n=5), nsmall=3, digits=3))
+}
+#print tables
+library(knitr)
+library(kableExtra)
+kable(keyword_table, caption = "Keyness and Effect Size") %>%
+  kable_styling("striped", full_width = F) %>%
+  pack_rows(discipline_vector[[1]], 1,5) %>%
+  pack_rows(discipline_vector[[2]], 6,10) %>%
+  pack_rows(discipline_vector[[3]], 11,15) %>%
+  pack_rows(discipline_vector[[4]], 16, 20) %>%
+  pack_rows(discipline_vector[[5]], 21,25) %>%
+  pack_rows(discipline_vector[[6]], 26, 30) %>%
+  pack_rows(discipline_vector[[7]], 31,35) %>%
+  pack_rows(discipline_vector[[8]], 36, 40) %>%
+  pack_rows(discipline_vector[[9]], 41,45) %>%
+  pack_rows(discipline_vector[[10]], 46, 50) %>%
+  pack_rows(discipline_vector[[11]], 51,55) %>%
+  pack_rows(discipline_vector[[12]], 56, 60) %>%
+  pack_rows(discipline_vector[[13]], 61,65)
+```
+
+# Stylometry
+In this section, we are interested in how papers cluster together based on the "distances" between them, and what particular words are driving these clusters.
+
+There are many different ways to calculate the distances between texts. Some common distance measurements include Euclidean, Delta, Manhattan, Argamon's, Canberra, Wurzburg, Cosine, and Min-Max. The basic idea behind all of these is to represent how similar two texts are, based on how similar their distributions of function words are. Thus, texts with very similar distributions of function words get a lower distance. The methods vary in their precise algorithm to calculate this distance.
+
+Each graph below uses a different distance measurement. Based on these distances, the dendrograms below are created using agglomerative hierarchical clustering. Each node at the right represents one text, color-coded by discipline. It is not important (or feasible) here to see all of the text names, but it is interesting to see which distance algorithm produces the best clustering of papers (in other words, which graph shows the colors most tightly grouped together). It appears that Manhattan and Delta are doing a fairly good job, while Euclidean and Wurzburg seem a little messier.
+``` {r distances, message=FALSE, error=FALSE}
+#create data frame for analysis
+stylo_df<-dplyr::select(fxnword_normalized_df, -wordcount, -discipline) %>% data.frame(., row.names=1)
+
+#run results w various distance measures
+stylo_euclidean_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='euclidean', display.on.screen = FALSE, write.jpg.file = TRUE)
+
+stylo_delta_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='delta', display.on.screen = FALSE, write.jpg.file = TRUE, write.jpg.file = TRUE)
+
+stylo_manhattan_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='manhattan', display.on.screen = FALSE, write.jpg.file = TRUE)
+
+stylo_argamon_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='argamon', display.on.screen = FALSE, write.jpg.file = TRUE)
+
+stylo_canberra_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='canberra', display.on.screen = FALSE, write.jpg.file = TRUE)
+
+stylo_wurzburg_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='wurzburg', display.on.screen = FALSE, write.jpg.file = TRUE)
+
+stylo_cosine_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='cosine', display.on.screen = FALSE, write.jpg.file = TRUE)
+
+stylo_minmax_results <- stylo::stylo(gui=FALSE, frequencies = stylo_df, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='minmax', display.on.screen = FALSE, write.jpg.file = TRUE)
+```
+
+``` {r plot grid of dendrograms, echo=FALSE}
+#read in jpg files
+library(grid)
+argamonplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__Argamon's Delta__001.jpg"))
+canberraplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__Canberra__001.jpg"))
+deltaplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__Classic Delta__001.jpg"))
+cosineplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__Cosine__001.jpg"))
+euclideanplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__Euclidean__001.jpg"))
+manhattanplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__Manhattan__001.jpg"))
+minmaxplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__minmax__001.jpg"))
+wurzburgplot<-rasterGrob(jpeg::readJPEG("dissertation_CA_238_MFWs_Culled_0__wurzburg__001.jpg"))
+
+#arrange plots and print
+gridExtra::grid.arrange(gridExtra::arrangeGrob(argamonplot, bottom = "Argamon"), gridExtra::arrangeGrob(canberraplot, bottom = "Canberra"), ncol = 2)
+gridExtra::grid.arrange(gridExtra::arrangeGrob(deltaplot, bottom = "Delta"), gridExtra::arrangeGrob(cosineplot, bottom = "Cosine"), ncol = 2)
+gridExtra::grid.arrange(gridExtra::arrangeGrob(euclideanplot, bottom = "Euclidean"), gridExtra::arrangeGrob(manhattanplot,bottom = "Manhattan"),ncol = 2)
+gridExtra::grid.arrange(gridExtra::arrangeGrob(minmaxplot, bottom = "Min-Max"), gridExtra::arrangeGrob(wurzburgplot, bottom = "Wurzburg"),ncol = 2)
+```
+
+In the keyness and effect size tables, it became apparent that pronouns were playing a large role in disciplinary discourse. Because pronoun use might be intuitive in some cases (for example, history may use a lot of "he" to talk about historical male figures that have been historically overrrepresented in comparison to women), it may be interesting to explore disciplinary differences when pronouns are not included in the function words analyzed. The graphs below repeat the analysis done before, but with pronouns left out.
+
+``` {r distances no pronouns, echo=FALSE, message = FALSE}
+#create data frame for analysis
+stylo_df_nopronouns<-dplyr::select(fxnword_normalized_df, -wordcount, -discipline, -herself, -theirs, -ourselves, -mine, -you, -him, -their, -us, -we, -they, -them, -ours, -i, -his, -her, -he, -she, -themselves, -your, -my, -himself, -me, -myself, -yourself, -hers, -oneself, -yours, -yourselves, -themself) %>% data.frame(., row.names=1)
+
+#run results w various distance measures
+stylo_euclidean_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='euclidean', display.on.screen = FALSE, write.png.file = TRUE)
+
+stylo_delta_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='delta', display.on.screen = FALSE, write.png.file = TRUE)
+
+stylo_manhattan_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='manhattan', display.on.screen = FALSE, write.png.file = TRUE)
+
+stylo_argamon_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='argamon', display.on.screen = FALSE, write.png.file = TRUE)
+
+stylo_canberra_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='canberra', display.on.screen = FALSE, write.png.file = TRUE)
+
+stylo_wurzburg_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='wurzburg', display.on.screen = FALSE, write.png.file = TRUE)
+
+stylo_cosine_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='cosine', display.on.screen = FALSE, write.png.file = TRUE)
+
+stylo_minmax_results_nopronouns <- stylo::stylo(gui=FALSE, frequencies = stylo_df_nopronouns, mfw.min = 240, mfw.max=240, plot.custom.height = 13, plot.font.size = 1.8, distance.measure='minmax', display.on.screen = FALSE, write.png.file = TRUE)
+```
+
+``` {r plot grid of dendrograms no pronouns, echo=FALSE}
+#read in image files
+library(grid)
+argamonplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__Argamon's Delta__001.png"))
+canberraplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__Canberra__001.png"))
+deltaplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__Classic Delta__001.png"))
+cosineplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__Cosine__001.png"))
+euclideanplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__Euclidean__001.png"))
+manhattanplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__Manhattan__001.png"))
+minmaxplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__minmax__001.png"))
+wurzburgplot_nopronouns<-rasterGrob(png::readPNG("dissertation_CA_209_MFWs_Culled_0__wurzburg__001.png"))
+
+#arrange and print image files
+gridExtra::grid.arrange(gridExtra::arrangeGrob(argamonplot_nopronouns,bottom = "Argamon, no pronouns"), gridExtra::arrangeGrob(canberraplot_nopronouns,bottom = "Canberra, no pronouns"), ncol = 2)
+gridExtra::grid.arrange(gridExtra::arrangeGrob(deltaplot_nopronouns,bottom = "Delta, no pronouns"), gridExtra::arrangeGrob(cosineplot_nopronouns,bottom = "Cosine, no pronouns"),ncol = 2)
+gridExtra::grid.arrange(gridExtra::arrangeGrob(euclideanplot_nopronouns,bottom = "Euclidean, no pronouns"), gridExtra::arrangeGrob(manhattanplot_nopronouns,bottom = "Manhattan, no pronouns"), ncol = 2)
+gridExtra::grid.arrange(gridExtra::arrangeGrob(minmaxplot_nopronouns,bottom = "Min-Max, no pronouns"), gridExtra::arrangeGrob(wurzburgplot_nopronouns, bottom = "Wurzburg, no pronouns"),ncol = 2)
+```
+
+Delta appears to be one of the strongest out of each measurement tested, and also has a lot of previous research around it to suggest its strength in authorship attribution (note that Manhattan is also especially strong, and it may be worth exploring some of the reasons for this). The figures below show both cluster analyses using the Delta measurement, both with and without pronouns, for comparison. There are not major differences between the two, though without pronouns appears to be slightly more accurate in grouping disciplines. The clusters themselves are also somewhat different.
+```{r delta pronoun comparison, echo=FALSE}
+gridExtra::grid.arrange(gridExtra::arrangeGrob(deltaplot,bottom="With pronouns"), gridExtra::arrangeGrob(deltaplot_nopronouns, bottom="Without pronouns"),ncol = 2)
+```
+
+Another way to visualize the distances here is through techniques drawn from network analysis, as laid out in Eder (2017). When dendrograms are created from the bottom-up, the two nodes with the smallest distance are connected, which disregards any information about which node was 2nd or 3rd closest. This information might also be useful for helping to see which texts are most closely related. Delta distances (without pronouns) are visualized below using Gephi (a data visualization program) with the ForceAtlas2 setting, which helps to better visualize clusters. Ultimately, this visualization allows us to more easily see clusters, and which clusters are close to each other, of texts.
+
+```{r gephi, echo=FALSE}
+knitr::include_graphics("gephi_delta_209_labels.png")
+```
+
+# Chapter analyses
+## Case study: Part 1
+Part 1 of the case study will focus on explaining the difference in function word usage between the humanities and the sciences. This is a split that we see both in the network analysis visualization, and dendrograms based on Delta distance above.
+
+In order to do this analysis, we first identify what function words seem to contribute most to this split. In other words, which function words are driving the largest distance between humanities and science texts? Then for these function words, we add information about p-values, effect sizes, and keyness. The table below shows, for each function word, the total of its usage (in terms of z-scores) in both the humanities and sciences. The difference column simply subtracts the two, and the table is ranked by this column. 
+```{r create large table of distances between every pair of texts}
+#create master df for storing data
+distance_pieces_df <- matrix(0, nrow=209, 
+                             ncol=nrow(stylo_delta_results_nopronouns$table.with.all.zscores)^2)
+
+#create column names as a vector
+column_names <- outer(rownames(stylo_delta_results_nopronouns$table.with.all.zscores),
+                      rownames(stylo_delta_results_nopronouns$table.with.all.zscores),
+                      "paste",
+                      sep = "XXX")
+column_names <- as.vector(column_names)
+
+#calculate distances between every text and add to master df
+for (fxnword in 1:209) {
+  rowvalues <- outer(stylo_delta_results_nopronouns$table.with.all.zscores[,fxnword],
+                     stylo_delta_results_nopronouns$table.with.all.zscores[,fxnword],
+                     "-")
+  attr(rowvalues, "dim") <- prod(dim(rowvalues))
+  
+  distance_pieces_df[fxnword,] <- rowvalues
+  print(paste("progress is ",fxnword,"/209",sep=""))
+}
+
+distance_pieces_df <- as.data.frame(abs(distance_pieces_df))
+colnames(distance_pieces_df) <- column_names
+distance_pieces_df["Delta_distance",] <- colSums(distance_pieces_df)
+
+#remove duplicated columns
+distance_pieces_ids<-duplicated(as.list(distance_pieces_df))
+delete<-which(distance_pieces_ids)
+distance_pieces_df_v2 <- distance_pieces_df[,-c(delete)]
+distance_pieces_df_v2 <- distance_pieces_df_v2[,-1]
+```
+
+```{r}
+#keep only comparisons from entire comparison set that are between humanities and sciences
+ch1_comparisons<-c()
+for (text in 1:ncol(distance_pieces_df_v2)){
+  text2 <- substring(stringr::str_extract(colnames(distance_pieces_df_v2)[text],"XXX.*$"),4)
+  text1 <- colnames(distance_pieces_df_v2)[text]
+  if (startsWith(text1,"bio") || startsWith(text1,"cs")||
+      startsWith(text1,"phys")|| startsWith(text1,"cheme")|| 
+      startsWith(text1,"stats")){
+    text1_type<-"sciences"
+  }
+  else{
+    text1_type<-"humanities"
+  }
+  if (startsWith(text2,"bio") || startsWith(text2,"cs")|| 
+      startsWith(text2,"phys")|| startsWith(text2,"cheme")|| 
+      startsWith(text2,"stats")){
+    text2_type<-"sciences"
+  }
+  else{
+    text2_type<-"humanities"
+  }
+  if (text1_type != text2_type){
+    ch1_comparisons<-c(ch1_comparisons,text)
+    print(text1)
+  }
+}
+
+distance_pieces_ch1 <- distance_pieces_df_v2[,ch1_comparisons]
+
+#add up rows to create a total column
+distance_pieces_ch1$total_distance<-rowSums(distance_pieces_ch1)
+#sort whole df by the total_distance column
+distance_pieces_ch1 <- distance_pieces_ch1[order(distance_pieces_ch1$total_distance, decreasing=TRUE),]
+
+#create df for comparing
+ch1_delta_df<-data.frame(distance_pieces_ch1$total_distance)
+rownames(ch1_delta_df)<-rownames(distance_pieces_ch1)
+
+#clean up error??
+ch1_rownames <- rownames(ch1_delta_df)
+ch1_rownames<-stringr::str_replace(ch1_rownames, "\\.", "")
+rownames(ch1_delta_df)<-ch1_rownames
+
+```
+
+```{r ch1 fxnword id keyness and effect size}
+#get average humanities and science paper zscores
+#create humanities dataframe of zscores
+library(dplyr)
+
+#fix weird punctuation error
+stylo_colnames <- colnames(stylo_delta_results_nopronouns$table.with.all.zscores)
+stylo_colnames<-stringr::str_replace(stylo_colnames, "\\.", "")
+colnames(stylo_delta_results_nopronouns$table.with.all.zscores)<-stylo_colnames
+
+humanities_zscores_df <- as.data.frame(t(stylo_delta_results_nopronouns$table.with.all.zscores)) %>% dplyr::select(starts_with("ed"), starts_with("soc"),starts_with("lit"),starts_with("hist"),starts_with("ling"),starts_with("phil"),starts_with("perf"),starts_with("polsci"))
+
+#create sciences dataframe of zscores
+sciences_zscores_df <- as.data.frame(t(stylo_delta_results_nopronouns$table.with.all.zscores)) %>% dplyr::select(starts_with("cs"), starts_with("phys"),starts_with("cheme"),starts_with("stats"),starts_with("bio"))
+
+#create dfs for each discipline and add to ch1_delta_df
+cs_zscores <- as.data.frame(sciences_zscores_df) %>% dplyr::select(starts_with("cs"))
+cs_zscores$cs_average<-rowSums(cs_zscores)/ncol(cs_zscores)
+
+phys_zscores <- as.data.frame(sciences_zscores_df) %>% dplyr::select(starts_with("phys"))
+phys_zscores$phys_average<-rowSums(phys_zscores)/ncol(phys_zscores)
+
+cheme_zscores <- as.data.frame(sciences_zscores_df) %>% dplyr::select(starts_with("cheme"))
+cheme_zscores$cheme_average<-rowSums(cheme_zscores)/ncol(cheme_zscores)
+
+stats_zscores <- as.data.frame(sciences_zscores_df) %>% dplyr::select(starts_with("stats"))
+stats_zscores$stats_average<-rowSums(stats_zscores)/ncol(stats_zscores)
+
+bio_zscores <- as.data.frame(sciences_zscores_df) %>% dplyr::select(starts_with("bio"))
+bio_zscores$bio_average<-rowSums(bio_zscores)/ncol(bio_zscores)
+
+ed_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("ed"))
+ed_zscores$ed_average<-rowSums(ed_zscores)/ncol(ed_zscores)
+
+soc_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("soc"))
+soc_zscores$soc_average<-rowSums(soc_zscores)/ncol(soc_zscores)
+
+lit_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("lit"))
+lit_zscores$lit_average<-rowSums(lit_zscores)/ncol(lit_zscores)
+
+hist_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("hist"))
+hist_zscores$hist_average<-rowSums(hist_zscores)/ncol(hist_zscores)
+
+ling_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("ling"))
+ling_zscores$ling_average<-rowSums(ling_zscores)/ncol(ling_zscores)
+
+phil_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("phil"))
+phil_zscores$phil_average<-rowSums(phil_zscores)/ncol(phil_zscores)
+
+polsci_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("polsci"))
+polsci_zscores$polsci_average<-rowSums(polsci_zscores)/ncol(polsci_zscores)
+
+perf_zscores <- as.data.frame(humanities_zscores_df) %>% dplyr::select(starts_with("perf"))
+perf_zscores$perf_average<-rowSums(perf_zscores)/ncol(perf_zscores)
+
+#add average columns to both humanities and sciences zscores dfs
+humanities_zscores_df$humanities_average<-rowSums(humanities_zscores_df)/ncol(humanities_zscores_df)
+sciences_zscores_df$sciences_average<-rowSums(sciences_zscores_df)/ncol(sciences_zscores_df)
+
+#add average columns to ch1_delta_df
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(humanities_zscores_df,ncol(humanities_zscores_df)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(sciences_zscores_df,ncol(sciences_zscores_df)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(cs_zscores,ncol(cs_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(bio_zscores,ncol(bio_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(cheme_zscores,ncol(cheme_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(phys_zscores,ncol(phys_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(stats_zscores,ncol(stats_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(ed_zscores,ncol(ed_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(hist_zscores,ncol(hist_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(ling_zscores,ncol(ling_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(lit_zscores,ncol(lit_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(perf_zscores,ncol(perf_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(phil_zscores,ncol(phil_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(soc_zscores,ncol(soc_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+ch1_delta_df<-merge(ch1_delta_df,dplyr::select(polsci_zscores,ncol(polsci_zscores)),by="row.names")
+ch1_delta_df <- data.frame(ch1_delta_df, row.names=1)
+
+#add column saying whether word is more prominent in humanities or sciences
+for (r in 1:nrow(ch1_delta_df)){
+  if (ch1_delta_df$humanities_average[r] > ch1_delta_df$sciences_average[r]){
+    ch1_delta_df$discipline[r] <- "humanities"
+  } else {
+    ch1_delta_df$discipline[r] <- "sciences"
+  }
+}
+
+#create dfm grouped by discipline
+keyness_ch1_dfm <- dfm_group(rawtokens_dfm, groups="ch1")
+ch1_vector <- unique(metadata$ch1)
+
+#create list to store values in and data frame to print
+keywords_ch1 <- list()
+keyword_table_ch1 <- data.frame()
+#loop through disciplines and store values in keywords list
+for (i in 1:length(ch1_vector)) {
+  #get keywords
+  keywords_ch1[[ch1_vector[i]]] <- textstat_keyness(keyness_ch1_dfm, 
+                                                     target=ch1_vector[i], 
+                                                     measure = "lr")
+  #add effect size
+  keywords_ch1[[ch1_vector[i]]] <- keywords_ch1[[ch1_vector[i]]] %>% 
+    dplyr::mutate(., effect = effect_size(n_target, n_reference))
+  #take away target and reference counts
+  pr <- dplyr::select(keywords_ch1[[ch1_vector[i]]], -n_target, -n_reference)
+  #rename columns
+  names(pr)[2] <- 'keyness'
+  names(pr)[3] <- 'p-value'
+  names(pr)[4] <- 'effect size'
+  #append to table for printing & save discipline name
+  keyword_table_ch1 <- rbind(keyword_table_ch1, pr)
+}
+
+#assign rownames to data
+keywords_ch1[["humanities"]] <- data.frame(keywords_ch1[["humanities"]][,-1], 
+                                           row.names = keywords_ch1[["humanities"]][,1])
+keywords_ch1[["sciences"]] <- data.frame(keywords_ch1[["sciences"]][,-1], 
+                                           row.names = keywords_ch1[["sciences"]][,1])
+
+#add keyness info to ch1_delta_df
+for (i in 1:nrow(ch1_delta_df)){
+  word <- rownames(ch1_delta_df)[i]
+  if (ch1_delta_df$discipline[i] == "sciences"){
+    keyness = keywords_ch1[["sciences"]][word,"G2"]
+    effect = keywords_ch1[["sciences"]][word,"effect"]
+    pvalue = keywords_ch1[["sciences"]][word,"p"]
+    ch1_delta_df$keyness[i] <- keyness
+    ch1_delta_df$effect_size[i] <- effect
+    ch1_delta_df$p_value[i] <- pvalue
+  }
+  else {
+    keyness = keywords_ch1[["humanities"]][word,"G2"]
+    effect = keywords_ch1[["humanities"]][word,"effect"]
+    pvalue = keywords_ch1[["humanities"]][word,"p"]
+    ch1_delta_df$keyness[i] <- keyness
+    ch1_delta_df$effect_size[i] <- effect
+    ch1_delta_df$p_value[i] <- pvalue
+  }
+}
+
+#clean up table column names and make distance proportional to Delta
+colnames(ch1_delta_df)[1]<-"Delta_distance"
+ch1_delta_df$Delta_distance<-ch1_delta_df$Delta_distance/nrow(ch1_delta_df)
+
+#print sample
+print(head(ch1_delta_df))
+```
+
+Finally, the tables created below show each keyword in context for every text. Samples are shown below. A particular keyword's usage in either the humanities or sciences can be accessed with sciences_kwic[['the']]. A particular keyword's usage in a particular paper can be accessed with sciences_kwic[['the']][sciences_kwic[['the']]$docname == 'cs_cvpr_2017_1.txt',].
+```{r kwic ch1, message=FALSE}
+#create humanities and sciences sub-corpora
+humanities_corpus <- corpus_subset(full_corpus, Disc_short == "ed" | Disc_short == "lit" | Disc_short == "perf" | Disc_short == "ling" | Disc_short == "phil" | Disc_short == "soc" | Disc_short == "polsci" | Disc_short == "hist")
+sciences_corpus <- corpus_subset(full_corpus, Disc_short == "cheme" | Disc_short == "cs" | Disc_short == "phys" | Disc_short == "stats" | Disc_short == "bio")
+
+#create kwic lists
+humanities_kwic <- list()
+sciences_kwic <- list()
+for (word in 1:209) {
+  fxnword <- rownames(ch1_df)[word]
+  h<-kwic(humanities_corpus, fxnword, window = 12, wholeword=TRUE)
+  s<-kwic(sciences_corpus, fxnword, window = 12, wholeword=TRUE)
+  humanities_kwic[[fxnword]]<-h
+  sciences_kwic[[fxnword]]<-s
+}
+
+print(head(sciences_kwic[['the']][sciences_kwic[['the']]$docname == 'cs_cvpr_2017_1.txt',]))
+print(head(humanities_kwic[['the']][humanities_kwic[['the']]$docname == 'perf_tdr_2017_1.txt',]))
+```
+
+## Case study: Part 2
+The table preview below shows which function words contribute to the spread within the sciences and humanities, respectively. In particular, the table below shows which words contribute most to the distance between computer science and cell & molecular biology, and philosophy and history. It also includes averages for each discipline on each function word, as well as p-values, effect sizes, and log-likelihood values.
+```{r chapter 2 analysis}
+#sciences
+#keep only comparisons between cs and bio
+ch2_comparisons<-c()
+for (text in 1:ncol(distance_pieces_df_v2)){
+  text2 <- substring(stringr::str_extract(colnames(distance_pieces_df_v2)[text],"XXX.*$"),4)
+  text1 <- colnames(distance_pieces_df_v2)[text]
+  if (startsWith(text1,"bio")){
+    text1_type<-"bio"
+  } else if (startsWith(text1,"cs")){
+    text1_type<-"cs"
+  } else {
+    text1_type<-"other"
+  } 
+  if (startsWith(text2,"bio")){
+    text2_type<-"bio"
+  } else if (startsWith(text2,"cs")){
+    text2_type<-"cs"
+  } else {
+    text2_type<-"other"
+  } 
+  if (text1_type == "bio" && text2_type == "cs" || text1_type == "cs" && text2_type =="bio"){
+    ch2_comparisons<-c(ch2_comparisons,text)
+    print(text1)
+  }
+}
+
+distance_pieces_sciences_ch2 <- distance_pieces_df_v2[,ch2_comparisons]
+
+#add up rows to create a total column
+distance_pieces_sciences_ch2$total_distance<-rowSums(distance_pieces_sciences_ch2)
+#sort whole df by the total_distance column
+distance_pieces_sciences_ch2 <- distance_pieces_sciences_ch2[order(distance_pieces_sciences_ch2$total_distance, decreasing=TRUE),]
+
+#create df for comparing
+ch2_sciences_df<-data.frame(distance_pieces_sciences_ch2$total_distance)
+rownames(ch2_sciences_df)<-rownames(distance_pieces_sciences_ch2)
+
+#humanities
+#keep only comparisons between phil & hist
+ch2_comparisons_hum<-c()
+for (text in 1:ncol(distance_pieces_df_v2)){
+  text2 <- substring(stringr::str_extract(colnames(distance_pieces_df_v2)[text],"XXX.*$"),4)
+  text1 <- colnames(distance_pieces_df_v2)[text]
+  if (startsWith(text1,"hist")){
+    text1_type<-"hist"
+  } else if (startsWith(text1,"phil")){
+    text1_type<-"phil"
+  } else {
+    text1_type<-"other"
+  } 
+  if (startsWith(text2,"hist")){
+    text2_type<-"hist"
+  } else if (startsWith(text2,"phil")){
+    text2_type<-"phil"
+  } else {
+    text2_type<-"other"
+  } 
+  if (text1_type == "hist" && text2_type == "phil" || text1_type == "phil" && text2_type =="hist"){
+    ch2_comparisons_hum<-c(ch2_comparisons_hum,text)
+  }
+}
+
+distance_pieces_hum_ch2 <- distance_pieces_df_v2[,ch2_comparisons_hum]
+
+#add up rows to create a total column
+distance_pieces_hum_ch2$total_distance<-rowSums(distance_pieces_hum_ch2)
+#sort whole df by the total_distance column
+distance_pieces_hum_ch2 <- distance_pieces_hum_ch2[order(distance_pieces_hum_ch2$total_distance, decreasing=TRUE),]
+
+#create df for comparing
+ch2_hum_df<-data.frame(distance_pieces_hum_ch2$total_distance)
+rownames(ch2_hum_df)<-rownames(distance_pieces_hum_ch2)
+```
+
+``` {r}
+#add averages
+#sciences
+ch2_sciences_df<-merge(ch2_sciences_df,dplyr::select(cs_zscores,ncol(cs_zscores)),by="row.names")
+ch2_sciences_df <- data.frame(ch2_sciences_df, row.names=1)
+ch2_sciences_df<-merge(ch2_sciences_df,dplyr::select(bio_zscores,ncol(bio_zscores)),by="row.names")
+ch2_sciences_df <- data.frame(ch2_sciences_df, row.names=1)
+#humanities
+ch2_hum_df<-merge(ch2_hum_df,dplyr::select(hist_zscores,ncol(hist_zscores)),by="row.names")
+ch2_hum_df <- data.frame(ch2_hum_df, row.names=1)
+ch2_hum_df<-merge(ch2_hum_df,dplyr::select(phil_zscores,ncol(phil_zscores)),by="row.names")
+ch2_hum_df <- data.frame(ch2_hum_df, row.names=1)
+
+#add column saying which discipline word is more prominent in
+#sciences
+for (r in 1:nrow(ch2_sciences_df)){
+  if (ch2_sciences_df$cs_average[r] > ch2_sciences_df$bio_average[r]){
+    ch2_sciences_df$discipline[r] <- "cs"
+  } else {
+    ch2_sciences_df$discipline[r] <- "bio"
+  }
+}
+#humanities
+for (r in 1:nrow(ch2_hum_df)){
+  if (ch2_hum_df$phil_average[r] > ch2_hum_df$hist_average[r]){
+    ch2_hum_df$discipline[r] <- "phil"
+  } else {
+    ch2_hum_df$discipline[r] <- "hist"
+  }
+}
+
+#sciences
+#create dfm grouped by discipline
+ch2_cs_corpus<-corpus_subset(full_corpus, Disc_short == "cs")
+ch2_bio_corpus<-corpus_subset(full_corpus, Disc_short == "bio")
+ch2_science_corpus<-c(ch2_cs_corpus,ch2_bio_corpus)
+
+#Count tokens in each text
+ch2sci_tokens <- tokens(ch2_science_corpus, include_docvars=TRUE, remove_punct = TRUE,
+                        remove_numbers = FALSE, remove_symbols = TRUE, what = "word")
+
+#To account for phrasal function words, combine phrases together with underscores
+ch2sci_tokens <- tokens_compound(ch2sci_tokens, pattern = phrase(multiword_expressions))
+ch2sci_rawtokens_dfm <- dfm(ch2sci_tokens)
+
+
+
+#humanities
+#create dfm grouped by discipline
+ch2_phil_corpus<-corpus_subset(full_corpus, Disc_short == "phil")
+ch2_hist_corpus<-corpus_subset(full_corpus, Disc_short == "hist")
+ch2_hum_corpus<-c(ch2_hist_corpus,ch2_phil_corpus)
+
+#Count tokens in each text
+ch2hum_tokens <- tokens(ch2_hum_corpus, include_docvars=TRUE, remove_punct = TRUE,
+                        remove_numbers = FALSE, remove_symbols = TRUE, what = "word")
+
+#To account for phrasal function words, combine phrases together with underscores
+ch2hum_tokens <- tokens_compound(ch2hum_tokens, pattern = phrase(multiword_expressions))
+ch2hum_rawtokens_dfm <- dfm(ch2hum_tokens)
+
+#keyness
+keyness_ch2sci_dfm <- dfm_group(ch2sci_rawtokens_dfm, groups="Disc_short")
+keyness_ch2hum_dfm <- dfm_group(ch2hum_rawtokens_dfm, groups="Disc_short")
+ch2sci_vector <- c("bio","cs")
+ch2hum_vector <- c("hist", "phil")
+
+#create list to store values in and data frame to print
+keywords_ch2sci <- list()
+keywords_ch2hum <- list()
+keyword_table_ch2sci <- data.frame()
+keyword_table_ch2hum <- data.frame()
+#loop through disciplines and store values in keywords list
+for (i in 1:length(ch2sci_vector)) {
+  #get keywords
+  keywords_ch2sci[[ch2sci_vector[i]]] <- textstat_keyness(keyness_ch2sci_dfm, 
+                                                     target=ch2sci_vector[i], 
+                                                     measure = "lr")
+  #add effect size
+  keywords_ch2sci[[ch2sci_vector[i]]] <- keywords_ch2sci[[ch2sci_vector[i]]] %>% 
+    dplyr::mutate(., effect = effect_size(n_target, n_reference))
+  #take away target and reference counts
+  pr <- dplyr::select(keywords_ch2sci[[ch2sci_vector[i]]], -n_target, -n_reference)
+  #rename columns
+  names(pr)[2] <- 'keyness'
+  names(pr)[3] <- 'p-value'
+  names(pr)[4] <- 'effect size'
+  #append to table for printing & save discipline name
+  keyword_table_ch2sci <- rbind(keyword_table_ch2sci, pr)
+}
+for (i in 1:length(ch2hum_vector)) {
+  #get keywords
+  keywords_ch2hum[[ch2hum_vector[i]]] <- textstat_keyness(keyness_ch2hum_dfm, 
+                                                     target=ch2hum_vector[i], 
+                                                     measure = "lr")
+  #add effect size
+  keywords_ch2hum[[ch2hum_vector[i]]] <- keywords_ch2hum[[ch2hum_vector[i]]] %>% 
+    dplyr::mutate(., effect = effect_size(n_target, n_reference))
+  #take away target and reference counts
+  pr <- dplyr::select(keywords_ch2hum[[ch2hum_vector[i]]], -n_target, -n_reference)
+  #rename columns
+  names(pr)[2] <- 'keyness'
+  names(pr)[3] <- 'p-value'
+  names(pr)[4] <- 'effect size'
+  #append to table for printing & save discipline name
+  keyword_table_ch2hum <- rbind(keyword_table_ch2hum, pr)
+}
+
+#assign rownames to data
+keywords_ch2sci[["bio"]] <- data.frame(keywords_ch2sci[["bio"]][,-1], 
+                                           row.names = keywords_ch2sci[["bio"]][,1])
+keywords_ch2sci[["cs"]] <- data.frame(keywords_ch2sci[["cs"]][,-1], 
+                                           row.names = keywords_ch2sci[["cs"]][,1])
+keywords_ch2hum[["phil"]] <- data.frame(keywords_ch2hum[["phil"]][,-1], 
+                                           row.names = keywords_ch2hum[["phil"]][,1])
+keywords_ch2hum[["hist"]] <- data.frame(keywords_ch2hum[["hist"]][,-1], 
+                                           row.names = keywords_ch2hum[["hist"]][,1])
+
+#add keyness info to main chapter dfs
+for (i in 1:nrow(ch2_sciences_df)){
+  word <- rownames(ch2_sciences_df)[i]
+  if (ch2_sciences_df$discipline[i] == "cs"){
+    keyness = keywords_ch2sci[["cs"]][word,"G2"]
+    effect = keywords_ch2sci[["cs"]][word,"effect"]
+    pvalue = keywords_ch2sci[["cs"]][word,"p"]
+    ch2_sciences_df$keyness[i] <- keyness
+    ch2_sciences_df$effect_size[i] <- effect
+    ch2_sciences_df$p_value[i] <- pvalue
+  }
+  else {
+    keyness = keywords_ch2sci[["bio"]][word,"G2"]
+    effect = keywords_ch2sci[["bio"]][word,"effect"]
+    pvalue = keywords_ch2sci[["bio"]][word,"p"]
+    ch2_sciences_df$keyness[i] <- keyness
+    ch2_sciences_df$effect_size[i] <- effect
+    ch2_sciences_df$p_value[i] <- pvalue
+  }
+}
+for (i in 1:nrow(ch2_hum_df)){
+  word <- rownames(ch2_hum_df)[i]
+  if (ch2_hum_df$discipline[i] == "phil"){
+    keyness = keywords_ch2hum[["phil"]][word,"G2"]
+    effect = keywords_ch2hum[["phil"]][word,"effect"]
+    pvalue = keywords_ch2hum[["phil"]][word,"p"]
+    ch2_hum_df$keyness[i] <- keyness
+    ch2_hum_df$effect_size[i] <- effect
+    ch2_hum_df$p_value[i] <- pvalue
+  }
+  else {
+    keyness = keywords_ch2hum[["hist"]][word,"G2"]
+    effect = keywords_ch2hum[["hist"]][word,"effect"]
+    pvalue = keywords_ch2hum[["hist"]][word,"p"]
+    ch2_hum_df$keyness[i] <- keyness
+    ch2_hum_df$effect_size[i] <- effect
+    ch2_hum_df$p_value[i] <- pvalue
+  }
+}
+
+#clean up table column names and make distance proportional to Delta
+colnames(ch2_sciences_df)[1]<-"Delta_distance"
+colnames(ch2_hum_df)[1]<-"Delta_distance"
+ch2_sciences_df$Delta_distance<-ch2_sciences_df$Delta_distance/nrow(ch2_sciences_df)
+ch2_hum_df$Delta_distance<-ch2_hum_df$Delta_distance/nrow(ch2_hum_df)
+
+#print samples
+print(head(ch2_sciences_df))
+print(head(ch2_hum_df))
+```
+## Case study: Part 3
+
+In order to determine what contributes to the "spread" within a discipline, we can isolate which words contribute to the most total distance between papers in the same discipline. First we'll calculate the distance contributions of each word. Then, we'll also add info about median frequencies for each discipline on each function word, as well as standard deviation, total counts, and highs and lows. The tables below show data on this for history and computer science.
+```{r ch3 distances, echo=FALSE, message=FALSE}
+#cs
+#keep only comparisons between cs papers
+ch3_comparisons<-c()
+for (text in 1:ncol(distance_pieces_df_v2)){
+  text2 <- substring(stringr::str_extract(colnames(distance_pieces_df_v2)[text],"XXX.*$"),4)
+  text1 <- colnames(distance_pieces_df_v2)[text]
+  if (startsWith(text1,"cs")){
+    text1_type<-"cs"
+  } else {
+    text1_type<-"other"
+  } 
+  if (startsWith(text2,"cs")){
+    text2_type<-"cs"
+  } else {
+    text2_type<-"other"
+  } 
+  if (text1_type == "cs" && text2_type == "cs"){
+    ch3_comparisons<-c(ch3_comparisons,text)
+  }
+}
+
+distance_pieces_cs_ch3 <- distance_pieces_df_v2[,ch3_comparisons]
+
+#add up rows to create a total column
+distance_pieces_cs_ch3$total_distance<-rowSums(distance_pieces_cs_ch3)
+#sort whole df by the total_distance column
+distance_pieces_cs_ch3 <- distance_pieces_cs_ch3[order(distance_pieces_cs_ch3$total_distance, decreasing=TRUE),]
+
+#create df for comparing
+ch3_cs_df<-data.frame(distance_pieces_cs_ch3$total_distance)
+rownames(ch3_cs_df)<-rownames(distance_pieces_cs_ch3)
+
+#history
+#keep only comparisons between history papers
+ch3_comparisons<-c()
+for (text in 1:ncol(distance_pieces_df_v2)){
+  text2 <- substring(stringr::str_extract(colnames(distance_pieces_df_v2)[text],"XXX.*$"),4)
+  text1 <- colnames(distance_pieces_df_v2)[text]
+  if (startsWith(text1,"hist")){
+    text1_type<-"hist"
+  } else {
+    text1_type<-"other"
+  } 
+  if (startsWith(text2,"hist")){
+    text2_type<-"hist"
+  } else {
+    text2_type<-"other"
+  } 
+  if (text1_type == "hist" && text2_type == "hist"){
+    ch3_comparisons<-c(ch3_comparisons,text)
+  }
+}
+
+distance_pieces_hist_ch3 <- distance_pieces_df_v2[,ch3_comparisons]
+
+#add up rows to create a total column
+distance_pieces_hist_ch3$total_distance<-rowSums(distance_pieces_hist_ch3)
+#sort whole df by the total_distance column
+distance_pieces_hist_ch3 <- distance_pieces_hist_ch3[order(distance_pieces_hist_ch3$total_distance, decreasing=TRUE),]
+
+#create df for comparing
+ch3_hist_df<-data.frame(distance_pieces_hist_ch3$total_distance)
+rownames(ch3_hist_df)<-rownames(distance_pieces_hist_ch3)
+
+##clean up table column names and make distance proportional to Delta
+colnames(ch3_cs_df)[1]<-"Delta_distance"
+colnames(ch3_hist_df)[1]<-"Delta_distance"
+ch3_cs_df$Delta_distance<-ch3_cs_df$Delta_distance/nrow(ch3_cs_df)
+ch3_hist_df$Delta_distance<-ch3_hist_df$Delta_distance/nrow(ch3_hist_df)
+```
+``` {r message=FALSE}
+#add medians, highs, lows
+#create token objects
+##Count tokens in each text
+ch3cs_tokens <- tokens(ch2_cs_corpus, include_docvars=TRUE, remove_punct = TRUE,
+                        remove_numbers = FALSE, remove_symbols = TRUE, what = "word")
+##To account for phrasal function words, combine phrases together with underscores
+ch3cs_tokens <- tokens_compound(ch3cs_tokens, pattern = phrase(multiword_expressions))
+ch3cs_rawtokens_dfm <- dfm(ch3cs_tokens)
+##Count tokens in each text
+ch3hist_tokens <- tokens(ch2_hist_corpus, include_docvars=TRUE, remove_punct = TRUE,
+                        remove_numbers = FALSE, remove_symbols = TRUE, what = "word")
+##To account for phrasal function words, combine phrases together with underscores
+ch3hist_tokens <- tokens_compound(ch3hist_tokens, pattern = phrase(multiword_expressions))
+ch3hist_rawtokens_dfm <- dfm(ch3hist_tokens)
+
+#get frequencies
+hist_freqs_temp<-as.data.frame(dfm_weight(ch3hist_rawtokens_dfm,scheme="prop")*10000)
+cs_freqs_temp<-as.data.frame(dfm_weight(ch3cs_rawtokens_dfm,scheme="prop")*10000)
+
+##fix up names
+names(cs_freqs_temp) <- gsub(".", "", names(cs_freqs_temp), fixed = TRUE)
+names(hist_freqs_temp) <- gsub(".", "", names(hist_freqs_temp), fixed = TRUE)
+cs_freqs <- cs_freqs_temp[,-1]
+row.names(cs_freqs) <- cs_freqs_temp[,1]
+hist_freqs <- hist_freqs_temp[,-1]
+row.names(hist_freqs) <- hist_freqs_temp[,1]
+
+##keep only fxn words
+fxnwords_cs <- c(rownames(ch3_cs_df))
+cs_desired_vars <- function(x) names(x) %in% fxnwords_cs
+fxnwords_hist <- c(rownames(ch3_hist_df))
+hist_desired_vars <- function(x) names(x) %in% fxnwords_hist
+cs_freqs_fxns <- cs_freqs[,cs_desired_vars(cs_freqs)]
+hist_freqs_fxns <- hist_freqs[,hist_desired_vars(hist_freqs)]
+##add column for median, high, and low for each word
+cs_freqs_fxns<-as.data.frame(t(cs_freqs_fxns))
+hist_freqs_fxns<-as.data.frame(t(hist_freqs_fxns))
+cs_freqs_fxns$median_freq = apply(cs_freqs_fxns,1,median)
+hist_freqs_fxns$median_freq = apply(hist_freqs_fxns,1,median)
+cs_freqs_fxns$high_freq = apply(cs_freqs_fxns,1,max)
+hist_freqs_fxns$high_freq = apply(hist_freqs_fxns,1,max)
+cs_freqs_fxns$low_freq = apply(cs_freqs_fxns,1,min)
+hist_freqs_fxns$low_freq = apply(hist_freqs_fxns,1,min)
+
+##attach to cs & hist dfs
+ch3_cs_temp <- merge(ch3_cs_df, cs_freqs_fxns[,c("median_freq","high_freq","low_freq")], by=0, all=TRUE)
+ch3_hist_temp <- merge(ch3_hist_df, hist_freqs_fxns[,c("median_freq","high_freq","low_freq")], by=0, all=TRUE)
+#make rownames
+ch3_cs <- ch3_cs_temp[,-1]
+row.names(ch3_cs) <- ch3_cs_temp[,1]
+ch3_hist <- ch3_hist_temp[,-1]
+row.names(ch3_hist) <- ch3_hist_temp[,1]
+
+#sciences
+#select just function word columns
+ch3cs_rawtokens_df <- data.frame(ch3cs_rawtokens_dfm)
+names(ch3cs_rawtokens_df) <- gsub(".", "", names(ch3cs_rawtokens_df), fixed = TRUE)
+ch3cs_fnxwords_rawtokens <- ch3cs_rawtokens_df[,cs_desired_vars(ch3cs_rawtokens_df)]
+row.names(ch3cs_fnxwords_rawtokens)<-row.names(ch3cs_rawtokens_df)
+#add row for total count
+ch3cs_fnxwords_rawtokens["N",] =colSums(ch3cs_fnxwords_rawtokens[-c(nrow(ch3cs_fnxwords_rawtokens)),])
+#hum
+#select just function word columns
+ch3hist_rawtokens_df <- data.frame(ch3hist_rawtokens_dfm)
+names(ch3hist_rawtokens_df) <- gsub(".", "", names(ch3hist_rawtokens_df), fixed = TRUE)
+ch3hist_fnxwords_rawtokens <- ch3hist_rawtokens_df[,hist_desired_vars(ch3hist_rawtokens_df)]
+row.names(ch3hist_fnxwords_rawtokens)<-row.names(ch3hist_rawtokens_df)
+#add row for total count
+ch3hist_fnxwords_rawtokens["N",] =colSums(ch3hist_fnxwords_rawtokens[-c(nrow(ch3hist_fnxwords_rawtokens)),])
+#add N data to discipline dfs
+ch3cs_fnxwords_rawtokens <- as.data.frame(t(ch3cs_fnxwords_rawtokens))
+ch3hist_fnxwords_rawtokens <- as.data.frame(t(ch3hist_fnxwords_rawtokens))
+ch3_cs$N=ch3cs_fnxwords_rawtokens$N[match(rownames(ch3_cs),rownames(ch3cs_fnxwords_rawtokens))]
+ch3_hist$N=ch3hist_fnxwords_rawtokens$N[match(rownames(ch3_hist),rownames(ch3hist_fnxwords_rawtokens))]
+
+#get and add standard deviation
+cs_freqs["st_dev",]=matrixStats::colSds(as.matrix(cs_freqs))
+hist_freqs["st_dev",]=matrixStats::colSds(as.matrix(hist_freqs))
+cs_freqs = as.data.frame(t(cs_freqs))
+hist_freqs = as.data.frame(t(hist_freqs))
+ch3_cs$st_dev = cs_freqs$st_dev[match(rownames(ch3_cs),rownames(cs_freqs))]
+ch3_hist$st_dev=hist_freqs$st_dev[match(rownames(ch3_hist),rownames(hist_freqs))]
+
+#print heads of results
+rownametocut<-c("Delta_distance")
+print_cs_df<-ch3_cs[!(row.names(ch3_cs) %in% rownametocut),]
+print_hist_df<-ch3_hist[!(row.names(ch3_hist) %in% rownametocut),]
+head(print_cs_df[order(print_cs_df$Delta_distance,decreasing=TRUE),],n=8)
+head(print_hist_df[order(print_hist_df$Delta_distance,decreasing=TRUE),],n=8)
+```
+Now that we have these words, let's check if any of them are correlated. That is, are texts that are low in one of these words also low in another? Or low in one often high in another? This will help to identify any groups that there might be in the data. Here are the correlation tables for the top function words in history and computer science (1 indicates a perfect correlation, and 0 no correlation).
+```{r ch3 correlations}
+#flip dfs & isolate only top fxn words
+ch3_cs_t <- as.data.frame(t(cs_freqs_fxns))
+ch3_hist_t <- as.data.frame(t(hist_freqs_fxns))
+ch3_cs_short <- ch3_cs_t[,c("every","such_that","our","next","each","which","instead")]
+ch3_hist_short <- ch3_hist_t[,c("had","despite","against","anyone","many","such_as","though")]
+
+#create correlation matrices
+cor(ch3_hist_short[,unlist(lapply(ch3_hist_short, is.numeric))])
+cor(ch3_cs_short[,unlist(lapply(ch3_cs_short, is.numeric))])
+```
